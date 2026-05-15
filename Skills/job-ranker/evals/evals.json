@@ -1,0 +1,33 @@
+[
+  {
+    "prompt": "Rank the scraped jobs and show me the best matches",
+    "assertions": [
+      "Runs a Python script that reads jobs_raw_*.json from the job-scraper output directory",
+      "Calls the Claude API (anthropic SDK) to score each job",
+      "Uses the candidate profile from references/profile.md in the scoring prompt",
+      "Filters to jobs with match_score >= 0.60",
+      "Sorts results by match_score descending",
+      "Writes output/jobs_ranked_{date}.json",
+      "Prints a summary including total evaluated, passed count, and top 5 matches"
+    ]
+  },
+  {
+    "prompt": "Score the jobs from today's scrape. Only show me ones that are 70% or better matches",
+    "assertions": [
+      "Uses threshold 0.70 instead of the default 0.60",
+      "Still reads from jobs_raw_*.json",
+      "Outputs a ranked JSON with threshold field set to 0.70",
+      "Prints the count of jobs passing the 70% threshold"
+    ]
+  },
+  {
+    "prompt": "Which jobs match my background? I want to see the full ranked list",
+    "assertions": [
+      "Reads candidate profile from references/profile.md",
+      "Scores all jobs in the raw file",
+      "Outputs ranked JSON at output/jobs_ranked_{date}.json",
+      "Includes match_reasons and match_gaps fields in each job entry",
+      "Jobs are sorted by match_score from highest to lowest"
+    ]
+  }
+]

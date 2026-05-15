@@ -1,8 +1,10 @@
 # Scraped output — regenerated daily, don't track
 Skills/job-scraper/output/*.json
+Skills/job-ranker/output/*.json
 
-# Keep the output directory itself
+# Keep output directories themselves
 !Skills/job-scraper/output/.gitkeep
+!Skills/job-ranker/output/.gitkeep
 
 # SQLite job database — local state, not tracked
 Skills/job-scraper/db/
