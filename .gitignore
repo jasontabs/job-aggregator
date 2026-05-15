@@ -1,0 +1,8 @@
+# Scraped output — regenerated daily, don't track
+Skills/job-scraper/output/*.json
+
+# Keep the output directory itself
+!Skills/job-scraper/output/.gitkeep
+
+# Claude local settings
+.claude/settings.local.json

@@ -1,0 +1,85 @@
+{
+  "skill_name": "job-scraper",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Find me remote PM jobs",
+      "expected_output": "A jobs_raw_{date}.json file written to output/ containing job listings from Greenhouse, Lever, and Built.in with all required schema fields populated and a run summary printed to stdout.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Output file is written to output/jobs_raw_{date}.json",
+          "type": "file_exists"
+        },
+        {
+          "text": "Output JSON contains a top-level 'jobs' array with at least one entry",
+          "type": "json_field"
+        },
+        {
+          "text": "Every job has id, title, company, url, source, and posted_at fields",
+          "type": "schema_valid"
+        },
+        {
+          "text": "All jobs have is_remote: true or location containing 'remote'",
+          "type": "filter_correct"
+        },
+        {
+          "text": "No jobs have compensation.listed: true with max < 175000",
+          "type": "comp_filter"
+        },
+        {
+          "text": "Run summary is printed to stdout with counts per source",
+          "type": "stdout_present"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Run the job scraper and look for staff and principal product manager openings at top tech companies. I want to make sure Stripe, Notion, and Anthropic are included.",
+      "expected_output": "JSON output with results from all three sources. Stripe, Notion, and Anthropic are queried via Greenhouse. Jobs are filtered to Staff PM / Principal PM titles. Any jobs with salary listed below $175k are excluded.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Output file is written to output/jobs_raw_{date}.json",
+          "type": "file_exists"
+        },
+        {
+          "text": "sources.greenhouse.companies_queried includes stripe, notion, and anthropic tokens",
+          "type": "source_coverage"
+        },
+        {
+          "text": "All job titles match PM role keywords (product manager, staff, principal, senior, head of product)",
+          "type": "title_filter"
+        },
+        {
+          "text": "No non-PM roles (engineer, designer, analyst) appear in the output",
+          "type": "false_positives"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "What PM jobs are out there today? Check all your usual sources and give me a fresh list.",
+      "expected_output": "Full scrape run across all sources, deduplication applied, output written. The run summary shows counts from all three sources (Greenhouse, Lever, Built.in). No duplicate job URLs appear in the output.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Output file is written to output/jobs_raw_{date}.json",
+          "type": "file_exists"
+        },
+        {
+          "text": "All three sources are represented in sources metadata (greenhouse, lever, builtin)",
+          "type": "all_sources"
+        },
+        {
+          "text": "No duplicate URLs appear in the jobs array",
+          "type": "no_duplicates"
+        },
+        {
+          "text": "scraped_at timestamp is present and in ISO 8601 format",
+          "type": "timestamp_valid"
+        }
+      ]
+    }
+  ]
+}
