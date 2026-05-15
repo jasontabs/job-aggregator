@@ -5,17 +5,23 @@ description: Scrapes tech job postings for Product Manager, Staff PM, and Princi
 
 # Job Scraper
 
-Fetches remote US Product Manager job postings from three ATS platforms — Greenhouse, Ashby, and Lever — querying the full list of known tech companies on each. Company token lists live in `data/` (sourced from [Feashliaa/job-board-aggregator](https://github.com/Feashliaa/job-board-aggregator), pre-filtered for tech companies). Writes output to `output/jobs_raw_{YYYY-MM-DD}.json`.
+Fetches remote US Product Manager job postings from three ATS platforms — Greenhouse, Ashby, and Lever — querying the full list of known tech companies on each. Company token lists live in `data/`. Results are persisted in a local SQLite database (`db/jobs.db`) with a 30-day TTL. Writes today's active jobs to `output/jobs_raw_{YYYY-MM-DD}.json`.
 
 Read `references/schemas.md` for the exact output JSON schema.
 
 ## Implementation
 
-Write and run a Python script. Use `ThreadPoolExecutor(max_workers=80)` for all three platforms — querying them sequentially (Greenhouse → Ashby → Lever) with full parallelism within each. Expected runtime: ~3 minutes total.
+Write and run a Python script. Use `ThreadPoolExecutor(max_workers=80)` for all three platforms. Expected runtime: ~3 minutes.
+
+### Shared helpers
 
 ```python
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import json, urllib.request, datetime, re, os, time
+import json, urllib.request, datetime, re, os, sqlite3, time
+
+NOW        = datetime.datetime.now(datetime.timezone.utc)
+CUTOFF_7D  = NOW - datetime.timedelta(days=7)   # only accept jobs posted within 7 days
+CUTOFF_30D = NOW - datetime.timedelta(days=30)  # expire jobs older than 30 days
 
 PM_KEYWORDS = [
     "product manager", "staff pm", "principal pm", "group product manager",
@@ -32,6 +38,21 @@ def is_us_remote(loc, is_remote=False, wtype=""):
     if any(t in l for t in NON_US): return False
     if is_remote or (wtype or "").lower() == "remote": return True
     return any(t in l for t in ["remote", "anywhere", "united states", "usa", "north america"]) or not l
+
+def parse_dt(s):
+    """Parse ISO 8601 string to aware datetime, or None if unparseable."""
+    if not s: return None
+    try:
+        s = re.sub(r'(\+\d{2}):?(\d{2})$', r'+\1:\2', s.rstrip("Z") + ("Z" if s.endswith("Z") else ""))
+        return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+def is_recent(posted_at_str):
+    """True if the job was posted within the last 7 days. Include if date is unknown."""
+    dt = parse_dt(posted_at_str)
+    if dt is None: return True   # no date info — don't discard
+    return dt >= CUTOFF_7D
 ```
 
 ### Greenhouse
@@ -40,11 +61,9 @@ def is_us_remote(loc, is_remote=False, wtype=""):
 
 Token list: `data/greenhouse_companies.json` (~7,300 tokens)
 
-Keep a job if `title` matches a PM keyword AND `location.name` passes `is_us_remote()`.
+Keep a job if `title` matches a PM keyword AND `location.name` passes `is_us_remote()` AND `is_recent(job.updated_at)`.
 
 Extract: `id = "gh-{job.id}"`, `title`, `company = token`, `location = job.location.name`, `url = job.absolute_url`, `apply_url = job.absolute_url`, `posted_at = job.updated_at`, `source = "greenhouse"`, `source_token = token`.
-
-For compensation: parse `$` amounts from `job.content` if fetching with `?content=true`; set `compensation.listed = false` if nothing found.
 
 ### Ashby
 
@@ -52,7 +71,7 @@ For compensation: parse `$` amounts from `job.content` if fetching with `?conten
 
 Token list: `data/ashby_companies.json` (~2,800 tokens). Response key is `jobs`.
 
-Keep a job if `title` matches AND (`isRemote == true` OR `workplaceType == "Remote"`) AND location doesn't contain non-US terms.
+Keep a job if `title` matches AND (`isRemote == true` OR `workplaceType == "Remote"`) AND location doesn't contain non-US terms AND `is_recent(job.publishedAt)`.
 
 Extract: `id = "ab-{job.id}"`, `title`, `company = token`, `location = job.location`, `url = job.jobUrl`, `apply_url = job.applyUrl`, `posted_at = job.publishedAt`, `source = "ashby"`.
 
@@ -62,35 +81,90 @@ Extract: `id = "ab-{job.id}"`, `title`, `company = token`, `location = job.locat
 
 Token list: `data/lever_companies.json` (~4,100 tokens). Response is a JSON array.
 
-Keep a job if `title` (field: `text`) matches AND `categories.location` or `categories.commitment` passes `is_us_remote()`.
+Keep a job if `title` (field: `text`) matches AND location passes `is_us_remote()` AND `is_recent()` on `posting.createdAt` (convert Unix ms → ISO 8601 first).
 
-Extract: `id = "lv-{posting.id}"`, `title = posting.text`, `company = token`, `location = posting.categories.location`, `url = posting.hostedUrl`, `apply_url = posting.applyUrl`, `posted_at` = ISO 8601 from `posting.createdAt` (Unix ms), `source = "lever"`.
+Extract: `id = "lv-{posting.id}"`, `title = posting.text`, `company = token`, `location = posting.categories.location`, `url = posting.hostedUrl`, `apply_url = posting.applyUrl`, `posted_at` = ISO 8601 from `posting.createdAt`, `source = "lever"`.
 
 ### Deduplication
 
-After collecting from all three platforms, deduplicate by normalized URL:
+Deduplicate scraped results by normalized URL before inserting into the database:
 ```python
 key = re.sub(r'[?#].*$', '', job["url"].lower().rstrip("/"))
 ```
-Keep first occurrence.
 
-### Compensation Filtering
+### Compensation filtering
 
 - **Exclude** jobs where `compensation.listed == True` AND `compensation.max < 175000`
-- **Include** all jobs where `compensation.listed == False` (most jobs don't list salary)
+- **Include** all jobs where `compensation.listed == False`
+
+### Persistence (SQLite)
+
+Database path: `db/jobs.db`. Create the directory and table if they don't exist.
+
+```python
+os.makedirs("db", exist_ok=True)
+con = sqlite3.connect("db/jobs.db")
+con.execute("""
+    CREATE TABLE IF NOT EXISTS jobs (
+        id           TEXT PRIMARY KEY,
+        title        TEXT,
+        company      TEXT,
+        location     TEXT,
+        url          TEXT,
+        apply_url    TEXT,
+        posted_at    TEXT,
+        source       TEXT,
+        source_token TEXT,
+        comp_listed  INTEGER DEFAULT 0,
+        comp_min     INTEGER,
+        comp_max     INTEGER,
+        first_seen_at TEXT NOT NULL,
+        expires_at    TEXT NOT NULL
+    )
+""")
+con.commit()
+```
+
+**Upsert** each scraped job (insert, ignore if `id` already exists — don't overwrite `first_seen_at`):
+```python
+con.execute("""
+    INSERT OR IGNORE INTO jobs
+        (id, title, company, location, url, apply_url, posted_at,
+         source, source_token, first_seen_at, expires_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+""", (job["id"], job["title"], job["company"], job["location"],
+      job["url"], job["apply_url"], job["posted_at"],
+      job["source"], job["source_token"],
+      NOW.isoformat(), (NOW + datetime.timedelta(days=30)).isoformat()))
+```
+
+**Expire** jobs whose 30-day window has closed:
+```python
+deleted = con.execute(
+    "DELETE FROM jobs WHERE expires_at < ?", (NOW.isoformat(),)
+).rowcount
+con.commit()
+```
+
+**Read** all surviving jobs for the output file:
+```python
+rows = con.execute("SELECT * FROM jobs ORDER BY first_seen_at DESC").fetchall()
+```
 
 ### Output
 
-Write `output/jobs_raw_{YYYY-MM-DD}.json`. See `references/schemas.md` for exact structure.
+Write `output/jobs_raw_{YYYY-MM-DD}.json` from the database rows (not just today's scrape — all jobs still within their 30-day window). See `references/schemas.md` for exact structure.
 
 Print run summary:
 ```
 Scraped {date}
-  Greenhouse : {N} queried, {N} kept, {N} errors  ({elapsed}s)
-  Ashby      : {N} queried, {N} kept, {N} errors  ({elapsed}s)
-  Lever      : {N} queried, {N} kept, {N} errors  ({elapsed}s)
-  Duplicates removed: {N}
-  Total written: {N} jobs → output/jobs_raw_{date}.json
+  Greenhouse : {N} queried, {N} new (≤7d), {N} errors  ({elapsed}s)
+  Ashby      : {N} queried, {N} new (≤7d), {N} errors  ({elapsed}s)
+  Lever      : {N} queried, {N} new (≤7d), {N} errors  ({elapsed}s)
+  Duplicates removed:  {N}
+  Expired (>30d):      {N} deleted from DB
+  Active in DB:        {N} jobs
+  Written: output/jobs_raw_{date}.json
 ```
 
 ## Refreshing the Company Lists

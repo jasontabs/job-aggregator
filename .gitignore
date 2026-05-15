@@ -4,5 +4,8 @@ Skills/job-scraper/output/*.json
 # Keep the output directory itself
 !Skills/job-scraper/output/.gitkeep
 
+# SQLite job database — local state, not tracked
+Skills/job-scraper/db/
+
 # Claude local settings
 .claude/settings.local.json

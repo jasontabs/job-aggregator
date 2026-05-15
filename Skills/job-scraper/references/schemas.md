@@ -30,7 +30,9 @@
         "listed": true
       },
       "source": "greenhouse",
-      "source_token": "stripe"
+      "source_token": "stripe",
+      "first_seen_at": "2025-01-15T20:00:00Z",
+      "expires_at": "2025-02-14T20:00:00Z"
     }
   ]
 }
@@ -54,3 +56,7 @@
 **source_token**: The Greenhouse, Ashby, or Lever token used to query. `null` for Built.in jobs.
 
 **id prefixes**: `gh-` = Greenhouse, `ab-` = Ashby, `lv-` = Lever, `bi-` = Built.in.
+
+**first_seen_at**: ISO 8601 UTC timestamp of when this job was first added to the local database. Used to enforce the 30-day TTL.
+
+**expires_at**: `first_seen_at + 30 days`. Jobs are deleted from the database once `expires_at` passes.
