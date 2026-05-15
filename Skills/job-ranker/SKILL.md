@@ -5,7 +5,12 @@ description: Scores and ranks scraped PM job postings against the user's profile
 
 # Job Ranker
 
-Reads the latest scraped jobs from `../job-scraper/output/jobs_raw_{YYYY-MM-DD}.json`, scores each against the candidate profile using Claude Haiku, filters to ≥60% match, and writes `output/jobs_ranked_{YYYY-MM-DD}.json`.
+Reads the latest scraped jobs from `../job-scraper/output/jobs_raw_{YYYY-MM-DD}.json`, applies hard pre-filters, scores qualifying jobs against the candidate profile using Claude Sonnet, filters to ≥60% match, and writes `output/jobs_ranked_{YYYY-MM-DD}.json`.
+
+**Hard filters (applied before scoring — not scored, just dropped):**
+- Title must contain one of the target PM keywords
+- Location must be remote US (no non-US terms, must contain "remote" / "anywhere" / be empty)
+- If salary is listed, `max` must be ≥ $175,000
 
 See `references/profile.md` for the candidate profile and scoring rubric.
 See `references/schema.md` for the exact output JSON schema.
@@ -24,6 +29,30 @@ THRESHOLD   = 0.60
 MAX_WORKERS = 10
 MODEL       = "claude-sonnet-4-6"
 TODAY       = datetime.date.today().isoformat()
+COMP_FLOOR  = 175_000
+
+PM_KEYWORDS = [
+    "product manager", "staff pm", "principal pm", "group product manager",
+    "senior product manager", "head of product", "staff product manager",
+    "principal product manager",
+]
+NON_US = ["emea", "europe", " uk", "london", "canada", "australia", "asia", "india", "brazil", "latam"]
+
+def passes_hard_filter(job):
+    title = (job.get("title") or "").lower()
+    loc   = (job.get("location") or "").lower()
+    comp  = job.get("compensation", {})
+
+    if not any(k in title for k in PM_KEYWORDS):
+        return False
+    if any(t in loc for t in NON_US):
+        return False
+    is_remote = any(t in loc for t in ["remote", "anywhere", "united states", "usa", "north america"]) or not loc
+    if not is_remote:
+        return False
+    if comp.get("listed") and comp.get("max", 0) < COMP_FLOOR:
+        return False
+    return True
 
 with open("references/profile.md") as f:
     PROFILE = f.read()
@@ -41,15 +70,18 @@ Return ONLY a JSON object — no explanation, no markdown:
 """
 
 def score_job(client, job):
-    title   = job.get("title", "")
-    company = job.get("company", "")
+    title    = job.get("title", "")
+    company  = job.get("company", "")
     location = job.get("location", "")
-    comp    = job.get("compensation", {})
+    synopsis = job.get("synopsis", "")
+    comp     = job.get("compensation", {})
     comp_str = ""
     if comp.get("listed"):
-        comp_str = f"\nCompensation: ${comp.get('min', 0):,}–${comp.get('max', 0):,}/yr"
+        comp_str = f"\nSalary: ${comp.get('min', 0):,}–${comp.get('max', 0):,}/yr"
 
     prompt = f"Title: {title}\nCompany: {company}\nLocation: {location}{comp_str}"
+    if synopsis:
+        prompt += f"\nRole: {synopsis}"
 
     try:
         response = client.messages.create(
@@ -86,6 +118,17 @@ jobs = data["jobs"]
 print(f"Scoring {len(jobs)} jobs from {os.path.basename(source_file)}...")
 ```
 
+### Hard pre-filter
+
+Apply before scoring — jobs that fail are dropped entirely, not scored:
+
+```python
+qualified    = [j for j in jobs if passes_hard_filter(j)]
+disqualified = len(jobs) - len(qualified)
+print(f"  Hard-filtered: {disqualified} jobs (wrong title / non-remote / salary below floor)")
+print(f"  Scoring {len(qualified)} qualifying jobs...")
+```
+
 ### Parallel scoring
 
 ```python
@@ -94,14 +137,14 @@ results = []
 errors  = 0
 
 with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-    futs = {ex.submit(score_job, client, j): j for j in jobs}
+    futs = {ex.submit(score_job, client, j): j for j in qualified}
     for i, fut in enumerate(as_completed(futs), 1):
         r = fut.result()
         results.append(r)
         if r.get("match_error"):
             errors += 1
         if i % 100 == 0:
-            print(f"  {i}/{len(jobs)} scored...")
+            print(f"  {i}/{len(qualified)} scored...")
 ```
 
 ### Filter and sort
@@ -137,11 +180,13 @@ with open(out_path, "w") as f:
 Print run summary:
 ```
 Ranked {date}
-  Source    : {source_file}
-  Evaluated : {N} jobs
-  Passed (≥60%): {N} jobs
-  Errors    : {N}
-  Written   : output/jobs_ranked_{date}.json
+  Source         : {source_file}
+  Total jobs     : {N}
+  Hard-filtered  : {N} (wrong title / non-remote / below salary floor)
+  Scored         : {N}
+  Passed (≥60%)  : {N}
+  Errors         : {N}
+  Written        : output/jobs_ranked_{date}.json
 
 Top 5 matches:
   1. {score}  {title} @ {company}

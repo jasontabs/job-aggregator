@@ -53,6 +53,36 @@ def is_recent(posted_at_str):
     dt = parse_dt(posted_at_str)
     if dt is None: return True   # no date info — don't discard
     return dt >= CUTOFF_7D
+
+def strip_html(html):
+    text = re.sub(r'<[^>]+>', ' ', html or '')
+    for ent, ch in [('&amp;','&'),('&lt;','<'),('&gt;','>'),('&nbsp;',' '),('&#39;',"'"),('&quot;','"')]:
+        text = text.replace(ent, ch)
+    return re.sub(r'\s+', ' ', text).strip()
+
+SALARY_RE = re.compile(r'\$([\d]+)\s*[kK]?\s*[-–—]+\s*\$?([\d]+)\s*[kK]?', re.I)
+
+def extract_salary(text):
+    """Parse annual salary range from plain text. Returns compensation dict."""
+    if not text: return {"listed": False}
+    m = SALARY_RE.search(text.replace(',', ''))
+    if not m: return {"listed": False}
+    lo, hi = int(m.group(1)), int(m.group(2))
+    if lo < 1000: lo *= 1000
+    if hi < 1000: hi *= 1000
+    if lo < 50000 or hi < 50000: return {"listed": False}
+    return {"min": min(lo, hi), "max": max(lo, hi), "currency": "USD", "listed": True}
+
+def make_synopsis(text):
+    """Extract 1-2 sentence role description from plain text."""
+    if not text: return ""
+    sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s.split()) > 6]
+    markers = ["we are looking", "we're looking", "we're hiring", "as a ", "you will",
+               "in this role", "this role", "seeking a", "this position"]
+    for i, s in enumerate(sents):
+        if any(m in s.lower() for m in markers):
+            return ' '.join(sents[i:i+2])
+    return ' '.join(sents[1:3]) if len(sents) >= 3 else text[:300]
 ```
 
 ### Greenhouse
@@ -85,6 +115,49 @@ Keep a job if `title` (field: `text`) matches AND location passes `is_us_remote(
 
 Extract: `id = "lv-{posting.id}"`, `title = posting.text`, `company = token`, `location = posting.categories.location`, `url = posting.hostedUrl`, `apply_url = posting.applyUrl`, `posted_at` = ISO 8601 from `posting.createdAt`, `source = "lever"`.
 
+Lever includes description inline — capture it during extraction (no extra API call needed):
+`_raw_desc = strip_html(posting.get("descriptionPlain") or posting.get("description", ""))[:5000]`
+
+### Description enrichment
+
+After all three platforms are scraped and `all_jobs` is assembled, fetch full descriptions for Greenhouse and Ashby jobs in a second parallel pass. Lever descriptions are already inline (captured as `_raw_desc`).
+
+```python
+def fetch_description(source, token, job_id):
+    """Fetch full job description HTML and return plain text. Returns '' on error."""
+    try:
+        if source == "greenhouse":
+            url = f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs/{job_id}"
+        elif source == "ashby":
+            url = f"https://api.ashbyhq.com/posting-api/job-board/{token}/posting/{job_id}"
+        else:
+            return ""
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            d = json.loads(r.read().decode())
+        html = d.get("content") or d.get("descriptionHtml") or d.get("description", "")
+        return strip_html(html)[:5000]
+    except Exception:
+        return ""
+
+def enrich(job):
+    raw_id = job["id"].split("-", 1)[1]
+    if job["source"] in ("greenhouse", "ashby"):
+        text = fetch_description(job["source"], job["source_token"], raw_id)
+    else:
+        text = job.pop("_raw_desc", "")
+    job["description"] = text
+    job["synopsis"]    = make_synopsis(text)
+    comp = extract_salary(text)
+    if comp["listed"]:
+        job["compensation"] = comp
+    return job
+
+print(f"Enriching {len(all_jobs)} matched jobs with descriptions...")
+with ThreadPoolExecutor(max_workers=80) as ex:
+    all_jobs = list(ex.map(enrich, all_jobs))
+```
+
 ### Deduplication
 
 Deduplicate scraped results by normalized URL before inserting into the database:
@@ -106,35 +179,47 @@ os.makedirs("db", exist_ok=True)
 con = sqlite3.connect("db/jobs.db")
 con.execute("""
     CREATE TABLE IF NOT EXISTS jobs (
-        id           TEXT PRIMARY KEY,
-        title        TEXT,
-        company      TEXT,
-        location     TEXT,
-        url          TEXT,
-        apply_url    TEXT,
-        posted_at    TEXT,
-        source       TEXT,
-        source_token TEXT,
-        comp_listed  INTEGER DEFAULT 0,
-        comp_min     INTEGER,
-        comp_max     INTEGER,
+        id            TEXT PRIMARY KEY,
+        title         TEXT,
+        company       TEXT,
+        location      TEXT,
+        url           TEXT,
+        apply_url     TEXT,
+        posted_at     TEXT,
+        source        TEXT,
+        source_token  TEXT,
+        comp_listed   INTEGER DEFAULT 0,
+        comp_min      INTEGER,
+        comp_max      INTEGER,
+        description   TEXT,
+        synopsis      TEXT,
         first_seen_at TEXT NOT NULL,
         expires_at    TEXT NOT NULL
     )
 """)
+# Migrate existing DBs that predate description/synopsis columns
+for col in ("description TEXT", "synopsis TEXT"):
+    try:
+        con.execute(f"ALTER TABLE jobs ADD COLUMN {col}")
+    except sqlite3.OperationalError:
+        pass
 con.commit()
 ```
 
 **Upsert** each scraped job (insert, ignore if `id` already exists — don't overwrite `first_seen_at`):
 ```python
+comp = job.get("compensation", {})
 con.execute("""
     INSERT OR IGNORE INTO jobs
         (id, title, company, location, url, apply_url, posted_at,
-         source, source_token, first_seen_at, expires_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+         source, source_token, comp_listed, comp_min, comp_max,
+         description, synopsis, first_seen_at, expires_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 """, (job["id"], job["title"], job["company"], job["location"],
       job["url"], job["apply_url"], job["posted_at"],
       job["source"], job["source_token"],
+      int(comp.get("listed", False)), comp.get("min"), comp.get("max"),
+      job.get("description", ""), job.get("synopsis", ""),
       NOW.isoformat(), (NOW + datetime.timedelta(days=30)).isoformat()))
 ```
 
@@ -161,6 +246,8 @@ Scraped {date}
   Greenhouse : {N} queried, {N} new (≤7d), {N} errors  ({elapsed}s)
   Ashby      : {N} queried, {N} new (≤7d), {N} errors  ({elapsed}s)
   Lever      : {N} queried, {N} new (≤7d), {N} errors  ({elapsed}s)
+  Descriptions fetched: {N} ({elapsed}s)
+  Salary found:        {N} jobs
   Duplicates removed:  {N}
   Expired (>30d):      {N} deleted from DB
   Active in DB:        {N} jobs
