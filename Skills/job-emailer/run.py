@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-Compose and send the daily ranked-jobs digest via Gmail SMTP.
+Compose and send the daily ranked-jobs digest via Resend API.
 
 Reads:
   ../job-ranker/output/jobs_ranked_{TODAY}.json   (ranker output, may be missing)
   ../job-scraper/output/jobs_new_{TODAY}.json     (today's scrape delta)
 
 Env vars required:
-  GMAIL_USER          - sender + recipient Gmail address
-  GMAIL_APP_PASSWORD  - 16-char app password from myaccount.google.com/apppasswords
+  RESEND_API_KEY  - API key from resend.com
+  TO_EMAIL        - recipient address (defaults to jasontabaczynski@gmail.com)
 """
 
-import os, json, smtplib, datetime
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import os, json, datetime, urllib.request, urllib.error
 from html import escape
 
 TODAY       = datetime.date.today().isoformat()
@@ -23,11 +21,11 @@ SCRAPER_OUT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "job-scraper", "ou
 
 SOURCE_LABELS = {"greenhouse": "Greenhouse", "ashby": "Ashby", "lever": "Lever"}
 
-GMAIL_USER         = os.environ.get("GMAIL_USER")
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+TO_EMAIL       = os.environ.get("TO_EMAIL", "jasontabaczynski@gmail.com")
 
-if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-    raise SystemExit("ERROR: GMAIL_USER and GMAIL_APP_PASSWORD must be set (add to ~/.job_aggregator_env)")
+if not RESEND_API_KEY:
+    raise SystemExit("ERROR: RESEND_API_KEY must be set (add to ~/.job_aggregator_env)")
 
 
 def classify_title(title):
@@ -172,15 +170,27 @@ parts.append("</body></html>")
 body_html = "\n".join(parts)
 
 
-# ── Send ────────────────────────────────────────────────────────────────────
-msg = MIMEMultipart("alternative")
-msg["Subject"] = subject
-msg["From"]    = GMAIL_USER
-msg["To"]      = GMAIL_USER
-msg.attach(MIMEText(body_html, "html"))
+# ── Send via Resend API ──────────────────────────────────────────────────────
+payload = json.dumps({
+    "from":    "Job Digest <onboarding@resend.dev>",
+    "to":      [TO_EMAIL],
+    "subject": subject,
+    "html":    body_html,
+}).encode()
 
-with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-    server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-    server.send_message(msg)
-
-print(f"Email sent: {subject}")
+req = urllib.request.Request(
+    "https://api.resend.com/emails",
+    data=payload,
+    method="POST",
+    headers={
+        "Authorization": f"Bearer {RESEND_API_KEY}",
+        "Content-Type":  "application/json",
+    },
+)
+try:
+    with urllib.request.urlopen(req) as resp:
+        result = json.loads(resp.read())
+    print(f"Email sent: {subject}  (id: {result.get('id', '?')})")
+except urllib.error.HTTPError as e:
+    body = e.read().decode()
+    raise SystemExit(f"Resend error {e.code}: {body}")
