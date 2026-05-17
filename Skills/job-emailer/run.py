@@ -29,7 +29,7 @@ RANKER_OUT  = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "job-ranker", "out
 SCRAPER_OUT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "job-scraper", "output"))
 CONNECTIONS_CSV = os.path.join(REPO_ROOT, "Linkedin-connections", "Connections.csv")
 
-SOURCE_LABELS = {"greenhouse": "Greenhouse", "ashby": "Ashby", "lever": "Lever"}
+SOURCE_LABELS = {"greenhouse": "Greenhouse", "ashby": "Ashby", "lever": "Lever", "remoteok": "Remote OK"}
 
 MAILGUN_API_KEY = os.environ.get("MAILGUN_API_KEY")
 MAILGUN_DOMAIN  = os.environ.get("MAILGUN_DOMAIN")

@@ -282,6 +282,58 @@ def scrape_lever(token):
         return [], str(e)
 
 
+def scrape_remoteok():
+    try:
+        req = urllib.request.Request(
+            "https://remoteok.com/api",
+            headers={"User-Agent": "Mozilla/5.0 job-aggregator/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode())
+        jobs = []
+        for item in data:
+            if not isinstance(item, dict) or "id" not in item:
+                continue  # first element is a legal notice, not a job
+            title = item.get("position", "")
+            if not is_pm(title):
+                continue
+            epoch = item.get("epoch")
+            if epoch:
+                dt = datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc)
+                if dt < CUTOFF_7D:
+                    continue
+                posted_at = dt.isoformat()
+            else:
+                posted_at = item.get("date", "")
+            loc = (item.get("location") or "Remote").strip()
+            if any(t in loc.lower() for t in NON_US):
+                continue
+            raw_desc = strip_html(item.get("description", ""))[:5000]
+            sal_min = item.get("salary_min") or 0
+            sal_max = item.get("salary_max") or 0
+            comp = {"listed": False}
+            if sal_min > 50000 and sal_max > 50000:
+                comp = {"listed": True, "min": sal_min, "max": sal_max, "currency": "USD"}
+            jobs.append({
+                "id":                  f"ro-{item['id']}",
+                "title":               title,
+                "company":             item.get("company", ""),
+                "location":            loc,
+                "url":                 item.get("url", ""),
+                "apply_url":           item.get("apply_url") or item.get("url", ""),
+                "posted_at":           posted_at,
+                "compensation":        comp,
+                "source":              "remoteok",
+                "source_token":        "remoteok",
+                "_ats_remote_flag":    True,
+                "_ats_workplace_type": "remote",
+                "_raw_desc":           raw_desc,
+            })
+        return jobs, None
+    except Exception as e:
+        return [], str(e)
+
+
 def fetch_description(source, token, job_id):
     try:
         if source == "greenhouse":
@@ -368,7 +420,16 @@ with ThreadPoolExecutor(max_workers=MAX_SCRAPE_WORKERS) as ex:
                 lv_err_samples.append(f"{token}: {err[:120]}")
 lv_elapsed = round(time.time() - t0, 1)
 
-all_jobs = gh_jobs + ab_jobs + lv_jobs
+t0 = time.time()
+ro_jobs, ro_errors, ro_err_samples = [], 0, []
+ro_result, ro_err = scrape_remoteok()
+ro_jobs.extend(ro_result)
+if ro_err:
+    ro_errors = 1
+    ro_err_samples.append(f"remoteok: {ro_err[:120]}")
+ro_elapsed = round(time.time() - t0, 1)
+
+all_jobs = gh_jobs + ab_jobs + lv_jobs + ro_jobs
 
 
 # ── Enrich ──────────────────────────────────────────────────────────────────
@@ -491,7 +552,8 @@ os.makedirs(out_dir, exist_ok=True)
 gh_status = source_status(len(gh_jobs), gh_errors, len(GH_TOKENS))
 ab_status = source_status(len(ab_jobs), ab_errors, len(ASHBY_TOKENS))
 lv_status = source_status(len(lv_jobs), lv_errors, len(LEVER_TOKENS))
-all_statuses = [gh_status, ab_status, lv_status]
+ro_status = "ok" if ro_errors == 0 else "failed"
+all_statuses = [gh_status, ab_status, lv_status, ro_status]
 overall_status = "failed" if all(s == "failed" for s in all_statuses) else \
                  "degraded" if any(s in ("failed", "degraded") for s in all_statuses) else "ok"
 
@@ -499,6 +561,7 @@ sources_meta = {
     "greenhouse": {"companies_queried": len(GH_TOKENS), "jobs_kept": len(gh_jobs), "errors": gh_errors, "elapsed_s": gh_elapsed},
     "ashby":      {"companies_queried": len(ASHBY_TOKENS), "jobs_kept": len(ab_jobs), "errors": ab_errors, "elapsed_s": ab_elapsed},
     "lever":      {"companies_queried": len(LEVER_TOKENS), "jobs_kept": len(lv_jobs), "errors": lv_errors, "elapsed_s": lv_elapsed},
+    "remoteok":   {"companies_queried": 1, "jobs_kept": len(ro_jobs), "errors": ro_errors, "elapsed_s": ro_elapsed},
 }
 
 raw_path = os.path.join(out_dir, f"jobs_raw_{TODAY}.json")
@@ -518,6 +581,7 @@ with open(status_path, "w") as f:
             "greenhouse": {"status": gh_status, "companies_queried": len(GH_TOKENS), "jobs_found": len(gh_jobs), "errors": gh_errors, "error_samples": gh_err_samples},
             "ashby":      {"status": ab_status, "companies_queried": len(ASHBY_TOKENS), "jobs_found": len(ab_jobs), "errors": ab_errors, "error_samples": ab_err_samples},
             "lever":      {"status": lv_status, "companies_queried": len(LEVER_TOKENS), "jobs_found": len(lv_jobs), "errors": lv_errors, "error_samples": lv_err_samples},
+            "remoteok":   {"status": ro_status, "companies_queried": 1, "jobs_found": len(ro_jobs), "errors": ro_errors, "error_samples": ro_err_samples},
         },
     }, f, indent=2)
 
@@ -527,6 +591,7 @@ print(f"\nScraped {TODAY}  [overall: {overall_status}]")
 print(f"  Greenhouse     : {len(GH_TOKENS)} queried, {len(gh_jobs)} new (≤7d), {gh_errors} errors  ({gh_elapsed}s)  [{gh_status}]")
 print(f"  Ashby          : {len(ASHBY_TOKENS)} queried, {len(ab_jobs)} new (≤7d), {ab_errors} errors  ({ab_elapsed}s)  [{ab_status}]")
 print(f"  Lever          : {len(LEVER_TOKENS)} queried, {len(lv_jobs)} new (≤7d), {lv_errors} errors  ({lv_elapsed}s)  [{lv_status}]")
+print(f"  Remote OK      : 1 queried, {len(ro_jobs)} new (≤7d), {ro_errors} errors  ({ro_elapsed}s)  [{ro_status}]")
 print(f"  Descriptions   : {pre_remote} fetched ({enrich_elapsed}s)")
 print(f"  Remote dropped : {remote_dropped} (no fully-remote signal in location, ATS flag, or description)")
 print(f"  Salary found   : {salary_count} jobs")
