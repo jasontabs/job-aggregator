@@ -323,9 +323,11 @@ def source_status(jobs_count, errors, total_tokens):
 # ── Scrape ──────────────────────────────────────────────────────────────────
 print(f"Scraping {TODAY}...")
 
+MAX_SCRAPE_WORKERS = int(os.environ.get("SCRAPE_WORKERS", "80"))
+
 t0 = time.time()
 gh_jobs, gh_errors, gh_err_samples = [], 0, []
-with ThreadPoolExecutor(max_workers=80) as ex:
+with ThreadPoolExecutor(max_workers=MAX_SCRAPE_WORKERS) as ex:
     futs = {ex.submit(scrape_greenhouse, t): t for t in GH_TOKENS}
     for fut in as_completed(futs):
         token = futs[fut]
@@ -339,7 +341,7 @@ gh_elapsed = round(time.time() - t0, 1)
 
 t0 = time.time()
 ab_jobs, ab_errors, ab_err_samples = [], 0, []
-with ThreadPoolExecutor(max_workers=80) as ex:
+with ThreadPoolExecutor(max_workers=MAX_SCRAPE_WORKERS) as ex:
     futs = {ex.submit(scrape_ashby, t): t for t in ASHBY_TOKENS}
     for fut in as_completed(futs):
         token = futs[fut]
@@ -353,7 +355,7 @@ ab_elapsed = round(time.time() - t0, 1)
 
 t0 = time.time()
 lv_jobs, lv_errors, lv_err_samples = [], 0, []
-with ThreadPoolExecutor(max_workers=80) as ex:
+with ThreadPoolExecutor(max_workers=MAX_SCRAPE_WORKERS) as ex:
     futs = {ex.submit(scrape_lever, t): t for t in LEVER_TOKENS}
     for fut in as_completed(futs):
         token = futs[fut]
@@ -371,7 +373,7 @@ all_jobs = gh_jobs + ab_jobs + lv_jobs
 # ── Enrich ──────────────────────────────────────────────────────────────────
 print(f"Enriching {len(all_jobs)} matched jobs with descriptions...")
 t0 = time.time()
-with ThreadPoolExecutor(max_workers=80) as ex:
+with ThreadPoolExecutor(max_workers=MAX_SCRAPE_WORKERS) as ex:
     all_jobs = list(ex.map(enrich, all_jobs))
 enrich_elapsed = round(time.time() - t0, 1)
 
