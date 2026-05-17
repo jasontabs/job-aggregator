@@ -28,16 +28,71 @@ PM_KEYWORDS = [
     "senior product manager", "head of product", "staff product manager",
     "principal product manager",
 ]
-NON_US = ["emea", "europe", " uk", "london", "canada", "australia", "asia", "india", "brazil", "latam"]
+
+# Non-US country / city tokens. Expand liberally — false-positive rejects are cheap.
+NON_US = [
+    "emea", "europe", "european union", " uk", "united kingdom", "london",
+    "ireland", "dublin", "canada", "toronto", "vancouver",
+    "australia", "sydney", "india", "bangalore", "mumbai", "singapore",
+    "japan", "tokyo", "china", "hong kong", "philippines", "indonesia",
+    "brazil", "latam", "mexico", "argentina",
+    "germany", "berlin", "france", "paris", "spain", "madrid", "netherlands", "amsterdam",
+    "poland", "warsaw", "portugal", "lisbon", "switzerland", "zurich",
+    "sweden", "denmark", "norway", "finland", "israel", "tel aviv",
+    "dubai", "uae", "russia", "ukraine", "turkey", "apac", "asia-pacific",
+    # ... see run.py for the full list
+]
+
+# Explicit hybrid / onsite signals in the location text.
+HYBRID_TERMS = ["hybrid", "on-site", "onsite", "on site", "in-office", "in office", "in-person", "in person"]
+
+# Phrases in description text that explicitly confirm fully remote.
+REMOTE_DESC_PHRASES = [
+    "fully remote", "100% remote", "remote-first", "work from anywhere",
+    "remote position", "remote role", "this role is remote",
+    "us remote", "remote within the us", "work remotely",
+    # ... see run.py for the full list
+]
+
+# Phrases in description text that disqualify (clearly NOT fully remote).
+HYBRID_DESC_PHRASES = [
+    "hybrid role", "hybrid position", "hybrid work", "hybrid schedule",
+    "this is a hybrid", "days in the office", "days per week in the office",
+    "must be willing to work from our",
+    # ... see run.py for the full list
+]
 
 def is_pm(title):
     return any(k in (title or "").lower() for k in PM_KEYWORDS)
 
-def is_us_remote(loc, is_remote=False, wtype=""):
+def passes_scrape_filter(loc, workplace_type=""):
+    """Cheap pre-enrichment filter — drops clearly non-US or clearly hybrid jobs.
+    The strict fully-remote check runs after enrichment when description text is available."""
     l = (loc or "").lower()
+    wt = (workplace_type or "").lower()
     if any(t in l for t in NON_US): return False
-    if is_remote or (wtype or "").lower() == "remote": return True
-    return any(t in l for t in ["remote", "anywhere", "united states", "usa", "north america"]) or not l
+    if any(t in l for t in HYBRID_TERMS): return False
+    if wt in ("hybrid", "onsite", "on-site", "office", "in-office"): return False
+    return True
+
+def is_us_fully_remote(loc, desc, ats_remote_flag=False, workplace_type=""):
+    """Strict post-enrichment check — must explicitly be fully remote AND US-eligible.
+
+    Accept only if at least ONE positive signal AND no disqualifying signal:
+      Positive: ATS remote flag, 'remote'/'anywhere' in location, or fully-remote phrase in description.
+      Reject:   NON_US match, HYBRID_TERMS in location, hybrid workplaceType, or HYBRID_DESC_PHRASES in description.
+    """
+    l, d, wt = (loc or "").lower(), (desc or "").lower(), (workplace_type or "").lower()
+    # Hard rejects
+    if any(t in l for t in NON_US):                return False
+    if any(t in l for t in HYBRID_TERMS):          return False
+    if wt in ("hybrid", "onsite", "on-site", "office", "in-office"): return False
+    if any(p in d for p in HYBRID_DESC_PHRASES):   return False
+    # Positive signals
+    if ats_remote_flag or wt == "remote":          return True
+    if any(t in l for t in ["remote", "anywhere", "work from home", "wfh"]): return True
+    if any(p in d for p in REMOTE_DESC_PHRASES):   return True
+    return False
 
 def parse_dt(s):
     """Parse ISO 8601 string to aware datetime, or None if unparseable."""
@@ -91,9 +146,9 @@ def make_synopsis(text):
 
 Token list: `data/greenhouse_companies.json` (~7,300 tokens)
 
-Keep a job if `title` matches a PM keyword AND `location.name` passes `is_us_remote()` AND `is_recent(job.updated_at)`.
+Keep a job if `title` matches a PM keyword AND `is_recent(job.updated_at)` AND `passes_scrape_filter(location.name)`.
 
-Extract: `id = "gh-{job.id}"`, `title`, `company = token`, `location = job.location.name`, `url = job.absolute_url`, `apply_url = job.absolute_url`, `posted_at = job.updated_at`, `source = "greenhouse"`, `source_token = token`.
+Extract: `id = "gh-{job.id}"`, `title`, `company = token`, `location = job.location.name`, `url = job.absolute_url`, `apply_url = job.absolute_url`, `posted_at = job.updated_at`, `source = "greenhouse"`, `source_token = token`. Greenhouse has no remote flag — set `_ats_remote_flag = False`, `_ats_workplace_type = ""`.
 
 ### Ashby
 
@@ -101,9 +156,9 @@ Extract: `id = "gh-{job.id}"`, `title`, `company = token`, `location = job.locat
 
 Token list: `data/ashby_companies.json` (~2,800 tokens). Response key is `jobs`.
 
-Keep a job if `title` matches AND (`isRemote == true` OR `workplaceType == "Remote"`) AND location doesn't contain non-US terms AND `is_recent(job.publishedAt)`.
+Keep a job if `title` matches AND `is_recent(job.publishedAt)` AND `passes_scrape_filter(location, workplaceType)`. **Do NOT** filter by `isRemote` at scrape time — stash it for the post-enrichment check instead. This way an Ashby job with `isRemote == false` but a description that says "fully remote" still gets a fair look.
 
-Extract: `id = "ab-{job.id}"`, `title`, `company = token`, `location = job.location`, `url = job.jobUrl`, `apply_url = job.applyUrl`, `posted_at = job.publishedAt`, `source = "ashby"`.
+Extract: `id = "ab-{job.id}"`, `title`, `company = token`, `location = job.location`, `url = job.jobUrl`, `apply_url = job.applyUrl`, `posted_at = job.publishedAt`, `source = "ashby"`, `_ats_remote_flag = bool(job.isRemote)`, `_ats_workplace_type = job.workplaceType`.
 
 ### Lever
 
@@ -111,9 +166,9 @@ Extract: `id = "ab-{job.id}"`, `title`, `company = token`, `location = job.locat
 
 Token list: `data/lever_companies.json` (~4,100 tokens). Response is a JSON array.
 
-Keep a job if `title` (field: `text`) matches AND location passes `is_us_remote()` AND `is_recent()` on `posting.createdAt` (convert Unix ms → ISO 8601 first).
+Keep a job if `title` (field: `text`) matches AND `is_recent()` on `posting.createdAt` (convert Unix ms → ISO 8601 first) AND `passes_scrape_filter(location, workplaceType)`.
 
-Extract: `id = "lv-{posting.id}"`, `title = posting.text`, `company = token`, `location = posting.categories.location`, `url = posting.hostedUrl`, `apply_url = posting.applyUrl`, `posted_at` = ISO 8601 from `posting.createdAt`, `source = "lever"`.
+Extract: `id = "lv-{posting.id}"`, `title = posting.text`, `company = token`, `location = posting.categories.location`, `url = posting.hostedUrl`, `apply_url = posting.applyUrl`, `posted_at` = ISO 8601 from `posting.createdAt`, `source = "lever"`, `_ats_workplace_type = posting.workplaceType`, `_ats_remote_flag = (workplaceType.lower() == "remote")`.
 
 Lever includes description inline — capture it during extraction (no extra API call needed):
 `_raw_desc = strip_html(posting.get("descriptionPlain") or posting.get("description", ""))[:5000]`
@@ -157,6 +212,23 @@ print(f"Enriching {len(all_jobs)} matched jobs with descriptions...")
 with ThreadPoolExecutor(max_workers=80) as ex:
     all_jobs = list(ex.map(enrich, all_jobs))
 ```
+
+### Strict fully-remote filter
+
+Now that description text is in hand, apply the full `is_us_fully_remote()` check. Drop anything that doesn't have an explicit remote signal — ATS flag, remote keyword in location, or fully-remote phrase in the description — and drop anything with a hybrid signal anywhere.
+
+```python
+kept = []
+for job in all_jobs:
+    ats_remote = job.pop("_ats_remote_flag", False)
+    ats_wtype  = job.pop("_ats_workplace_type", "")
+    if is_us_fully_remote(job.get("location", ""), job.get("description", ""), ats_remote, ats_wtype):
+        kept.append(job)
+remote_dropped = len(all_jobs) - len(kept)
+all_jobs = kept
+```
+
+This is the safety net that catches jobs the cheap pre-filter let through — bare `"United States"` locations, empty locations, US cities without an explicit remote signal, and hybrid roles whose hybrid-ness only appears in the description.
 
 ### Deduplication
 
@@ -236,9 +308,21 @@ con.commit()
 rows = con.execute("SELECT * FROM jobs ORDER BY first_seen_at DESC").fetchall()
 ```
 
+**Read** only jobs first seen during *this* run (the daily delta — what the ranker will score):
+```python
+new_rows = con.execute(
+    "SELECT * FROM jobs WHERE first_seen_at = ?", (NOW.isoformat(),)
+).fetchall()
+```
+Match on the exact `NOW.isoformat()` string, not a date range. Every row upserted in this run shares the same `first_seen_at`, and `INSERT OR IGNORE` preserves older timestamps on rows that already existed. Don't use `DATE(first_seen_at) = TODAY` — `first_seen_at` is UTC, so any run that crosses the UTC date boundary will silently report zero new jobs.
+
 ### Output
 
-Write `output/jobs_raw_{YYYY-MM-DD}.json` from the database rows (not just today's scrape — all jobs still within their 30-day window). See `references/schemas.md` for exact structure.
+Write **two** files from the database rows (not just today's scrape):
+- `output/jobs_raw_{YYYY-MM-DD}.json` — all jobs still within their 30-day window (full active set)
+- `output/jobs_new_{YYYY-MM-DD}.json` — only jobs first seen in this run (the daily delta the ranker consumes)
+
+See `references/schemas.md` for exact structure.
 
 Print run summary:
 ```
@@ -247,11 +331,14 @@ Scraped {date}
   Ashby      : {N} queried, {N} new (≤7d), {N} errors  ({elapsed}s)
   Lever      : {N} queried, {N} new (≤7d), {N} errors  ({elapsed}s)
   Descriptions fetched: {N} ({elapsed}s)
+  Remote dropped:      {N} (no fully-remote signal anywhere)
   Salary found:        {N} jobs
   Duplicates removed:  {N}
   Expired (>30d):      {N} deleted from DB
   Active in DB:        {N} jobs
+  New today:           {N} jobs
   Written: output/jobs_raw_{date}.json
+  Written: output/jobs_new_{date}.json
 ```
 
 ## Refreshing the Company Lists

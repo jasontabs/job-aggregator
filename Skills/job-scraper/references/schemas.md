@@ -9,8 +9,7 @@
   "sources": {
     "greenhouse": { "companies_queried": 19, "jobs_kept": 18, "errors": [] },
     "ashby":      { "companies_queried": 6,  "jobs_kept": 8,  "errors": [] },
-    "lever":      { "companies_queried": 1,  "jobs_kept": 0,  "errors": [] },
-    "builtin":    { "jobs_kept": 0, "note": "JS-rendered, requires headless browser" }
+    "lever":      { "companies_queried": 1,  "jobs_kept": 0,  "errors": [] }
   },
   "jobs": [
     {
@@ -41,7 +40,7 @@
 
 ## Field notes
 
-**id**: Prefixed by source — `gh-`, `lv-`, `bi-` — to avoid collisions when merging.
+**id**: Prefixed by source — `gh-`, `ab-`, `lv-` — to avoid collisions when merging.
 
 **is_remote**: `true` if location text contains `remote` or `anywhere`; `false` otherwise.
 
@@ -56,9 +55,9 @@
 - `listed`: `true` if salary was explicitly stated in the description or job metadata; `false` otherwise.
 - If `listed` is `false`, omit `min`/`max` entirely (don't set to 0 or null).
 
-**source_token**: The Greenhouse, Ashby, or Lever token used to query. `null` for Built.in jobs.
+**source_token**: The Greenhouse, Ashby, or Lever token used to query.
 
-**id prefixes**: `gh-` = Greenhouse, `ab-` = Ashby, `lv-` = Lever, `bi-` = Built.in.
+**id prefixes**: `gh-` = Greenhouse, `ab-` = Ashby, `lv-` = Lever.
 
 **first_seen_at**: ISO 8601 UTC timestamp of when this job was first added to the local database. Used to enforce the 30-day TTL.
 

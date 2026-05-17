@@ -9,5 +9,18 @@ Skills/job-ranker/output/*.json
 # SQLite job database — local state, not tracked
 Skills/job-scraper/db/
 
+# Daily run logs
+logs/
+
 # Claude local settings
 .claude/settings.local.json
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# macOS metadata
+.DS_Store
+
+# Local content not part of the agent
+Product Management/

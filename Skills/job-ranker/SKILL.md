@@ -5,12 +5,20 @@ description: Scores and ranks scraped PM job postings against the user's profile
 
 # Job Ranker
 
-Reads the latest scraped jobs from `../job-scraper/output/jobs_raw_{YYYY-MM-DD}.json`, applies hard pre-filters, scores qualifying jobs against the candidate profile using Claude Sonnet, filters to ≥60% match, and writes `output/jobs_ranked_{YYYY-MM-DD}.json`.
+Reads today's *new-jobs-only* delta from `../job-scraper/output/jobs_new_{YYYY-MM-DD}.json` if it exists, otherwise falls back to the most recent `jobs_raw_*.json`. Applies hard pre-filters, scores qualifying jobs against the candidate profile using Claude Sonnet, filters to ≥60% match, and writes `output/jobs_ranked_{YYYY-MM-DD}.json`.
+
+The daily cron pipeline scores only jobs newly added to the DB that morning — typical runs are 50-200 jobs, not the full ~1,300-job active set. The `jobs_raw_*.json` fallback exists for ad-hoc re-rankings of the full active set.
 
 **Hard filters (applied before scoring — not scored, just dropped):**
 - Title must contain one of the target PM keywords
-- Location must be remote US (no non-US terms, must contain "remote" / "anywhere" / be empty)
+- Must be explicitly fully remote AND US-eligible (see remote signal logic below)
 - If salary is listed, `max` must be ≥ $175,000
+
+**Remote signal logic (mirrors the scraper's strict filter):**
+- Drop if location matches any token in `NON_US` (Europe, UK, Canada, India, Australia, ~50 more)
+- Drop if location or description contains hybrid/onsite signals (`hybrid role`, `days in the office`, etc.)
+- Accept only if at least one of: `remote` / `anywhere` / `work from home` in location, OR an explicit fully-remote phrase in description (`fully remote`, `100% remote`, `remote-first`, `work from anywhere`, `remote position`, etc.)
+- Bare `"United States"`, empty location, and US cities without a remote signal are all rejected
 
 See `references/profile.md` for the candidate profile and scoring rubric.
 See `references/schema.md` for the exact output JSON schema.
@@ -36,23 +44,29 @@ PM_KEYWORDS = [
     "senior product manager", "head of product", "staff product manager",
     "principal product manager",
 ]
-NON_US = ["emea", "europe", " uk", "london", "canada", "australia", "asia", "india", "brazil", "latam"]
+# Expand NON_US, HYBRID_TERMS, REMOTE_DESC_PHRASES, and HYBRID_DESC_PHRASES
+# the same way the scraper does — see run.py for the full lists.
 
 def passes_hard_filter(job):
     title = (job.get("title") or "").lower()
     loc   = (job.get("location") or "").lower()
+    desc  = (job.get("description") or "").lower()
     comp  = job.get("compensation", {})
 
-    if not any(k in title for k in PM_KEYWORDS):
-        return False
-    if any(t in loc for t in NON_US):
-        return False
-    is_remote = any(t in loc for t in ["remote", "anywhere", "united states", "usa", "north america"]) or not loc
-    if not is_remote:
-        return False
-    if comp.get("listed") and comp.get("max", 0) < COMP_FLOOR:
-        return False
-    return True
+    if not any(k in title for k in PM_KEYWORDS):                return False
+    if comp.get("listed") and comp.get("max", 0) < COMP_FLOOR:  return False
+
+    # Hard rejects
+    if any(t in loc for t in NON_US):                  return False
+    if any(t in loc for t in HYBRID_TERMS):            return False
+    if any(p in desc for p in HYBRID_DESC_PHRASES):    return False
+
+    # Require explicit fully-remote signal
+    if any(t in loc for t in ["remote", "anywhere", "work from home", "wfh"]):
+        return True
+    if any(p in desc for p in REMOTE_DESC_PHRASES):
+        return True
+    return False
 
 with open("references/profile.md") as f:
     PROFILE = f.read()
@@ -105,17 +119,28 @@ def score_job(client, job):
 
 ### Loading input
 
-Find the most recent raw jobs file:
+Prefer today's new-only delta; fall back to the most recent full file:
 
 ```python
-files = sorted(glob.glob("../job-scraper/output/jobs_raw_*.json"))
-if not files:
-    raise FileNotFoundError("No jobs_raw_*.json found — run the job-scraper first.")
-source_file = files[-1]
+new_file  = f"../job-scraper/output/jobs_new_{TODAY}.json"
+raw_files = sorted(glob.glob("../job-scraper/output/jobs_raw_*.json"))
+
+if os.path.exists(new_file):
+    source_file, mode = new_file, "new-only"
+elif raw_files:
+    source_file, mode = raw_files[-1], "full"
+else:
+    raise FileNotFoundError("No jobs files found — run the job-scraper first.")
+
 with open(source_file) as f:
     data = json.load(f)
 jobs = data["jobs"]
-print(f"Scoring {len(jobs)} jobs from {os.path.basename(source_file)}...")
+
+if not jobs:
+    print(f"No new jobs today ({os.path.basename(source_file)}). Nothing to rank.")
+    raise SystemExit(0)
+
+print(f"Ranking {len(jobs)} jobs from {os.path.basename(source_file)} (mode: {mode})...")
 ```
 
 ### Hard pre-filter
