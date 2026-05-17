@@ -24,3 +24,6 @@ __pycache__/
 
 # Local content not part of the agent
 Product Management/
+
+# LinkedIn connections export — personal data, not tracked
+Linkedin-connections/
