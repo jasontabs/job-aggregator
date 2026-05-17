@@ -159,6 +159,7 @@ def extract_salary(text):
 
 def make_synopsis(text):
     if not text: return ""
+    text = strip_html(text)
     sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s.split()) > 6]
     markers = ["we are looking", "we're looking", "we're hiring", "as a ", "you will",
                "in this role", "this role", "seeking a", "this position"]

@@ -16,6 +16,12 @@ Env vars required:
 import os, json, datetime, urllib.request, urllib.error, urllib.parse, base64, csv, re
 from html import escape
 
+def _strip_html(text):
+    text = re.sub(r'<[^>]+>', ' ', text or '')
+    for ent, ch in [('&amp;','&'),('&lt;','<'),('&gt;','>'),('&nbsp;',' '),('&#39;',"'"),('&quot;','"')]:
+        text = text.replace(ent, ch)
+    return re.sub(r'\s+', ' ', text).strip()
+
 TODAY       = datetime.date.today().isoformat()
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT   = os.path.normpath(os.path.join(SCRIPT_DIR, "..", ".."))
@@ -212,7 +218,7 @@ else:
         company_raw = job.get("company", "") or ""
         company     = escape(company_raw)
         category    = classify_title(job.get("title", ""))
-        synopsis    = escape(job.get("synopsis", "") or "—")
+        synopsis    = escape(_strip_html(job.get("synopsis", "") or "—"))
         apply_url   = job.get("apply_url") or job.get("url", "") or "#"
         comp        = job.get("compensation", {}) or {}
         comp_html   = ""
