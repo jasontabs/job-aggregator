@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Compose and send the daily ranked-jobs digest via Resend API.
+Compose and send the daily ranked-jobs digest via Mailgun API.
 
 Reads:
   ../job-ranker/output/jobs_ranked_{TODAY}.json   (ranker output, may be missing)
   ../job-scraper/output/jobs_new_{TODAY}.json     (today's scrape delta)
 
 Env vars required:
-  RESEND_API_KEY  - API key from resend.com
-  TO_EMAIL        - recipient address (defaults to jasontabaczynski@gmail.com)
+  MAILGUN_API_KEY  - API key from mailgun.com
+  MAILGUN_DOMAIN   - sending domain (e.g. sandboxXXX.mailgun.org)
+  TO_EMAIL         - recipient address (defaults to jasontabaczynski@gmail.com)
 """
 
-import os, json, datetime, urllib.request, urllib.error
+import os, json, datetime, urllib.request, urllib.error, urllib.parse, base64
 from html import escape
 
 TODAY       = datetime.date.today().isoformat()
@@ -21,11 +22,14 @@ SCRAPER_OUT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "job-scraper", "ou
 
 SOURCE_LABELS = {"greenhouse": "Greenhouse", "ashby": "Ashby", "lever": "Lever"}
 
-RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
-TO_EMAIL       = os.environ.get("TO_EMAIL", "jasontabaczynski@gmail.com")
+MAILGUN_API_KEY = os.environ.get("MAILGUN_API_KEY")
+MAILGUN_DOMAIN  = os.environ.get("MAILGUN_DOMAIN")
+TO_EMAIL        = os.environ.get("TO_EMAIL", "jasontabaczynski@gmail.com")
 
-if not RESEND_API_KEY:
-    raise SystemExit("ERROR: RESEND_API_KEY must be set (add to ~/.job_aggregator_env)")
+if not MAILGUN_API_KEY:
+    raise SystemExit("ERROR: MAILGUN_API_KEY must be set (add to ~/.job_aggregator_env)")
+if not MAILGUN_DOMAIN:
+    raise SystemExit("ERROR: MAILGUN_DOMAIN must be set (add to ~/.job_aggregator_env)")
 
 
 def classify_title(title):
@@ -170,21 +174,22 @@ parts.append("</body></html>")
 body_html = "\n".join(parts)
 
 
-# ── Send via Resend API ──────────────────────────────────────────────────────
-payload = json.dumps({
-    "from":    "Job Digest <onboarding@resend.dev>",
-    "to":      [TO_EMAIL],
+# ── Send via Mailgun API ─────────────────────────────────────────────────────
+payload = urllib.parse.urlencode({
+    "from":    f"Job Digest <mailgun@{MAILGUN_DOMAIN}>",
+    "to":      TO_EMAIL,
     "subject": subject,
     "html":    body_html,
 }).encode()
 
+credentials = base64.b64encode(f"api:{MAILGUN_API_KEY}".encode()).decode()
 req = urllib.request.Request(
-    "https://api.resend.com/emails",
+    f"https://api.mailgun.net/v3/{MAILGUN_DOMAIN}/messages",
     data=payload,
     method="POST",
     headers={
-        "Authorization": f"Bearer {RESEND_API_KEY}",
-        "Content-Type":  "application/json",
+        "Authorization": f"Basic {credentials}",
+        "Content-Type":  "application/x-www-form-urlencoded",
     },
 )
 try:
@@ -193,4 +198,4 @@ try:
     print(f"Email sent: {subject}  (id: {result.get('id', '?')})")
 except urllib.error.HTTPError as e:
     body = e.read().decode()
-    raise SystemExit(f"Resend error {e.code}: {body}")
+    raise SystemExit(f"Mailgun error {e.code}: {body}")
